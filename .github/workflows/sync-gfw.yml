@@ -1,0 +1,59 @@
+name: Sync GFW Filtered List
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 每天 UTC 06:00 自动同步
+  workflow_dispatch:      # 支持手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download official gfw.txt (with retry)
+        run: |
+          curl -fsSL --retry 3 --retry-delay 5 --max-time 120 \
+            https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt \
+            -o /tmp/gfw.txt
+          echo "raw lines: $(wc -l < /tmp/gfw.txt)"
+
+      - name: Filter out Google Play CDN domains (exact parent domains only)
+        run: |
+          # 只移除这 5 个父域（兼容裸域名 / ||域名 / .域名 三种写法）
+          # 精确匹配整行，不误伤 gvt10.com、gvt1.example.com 等
+          grep -vE '^(\|\||\.)?(xn--ngstr-lra8j|gvt1|gvt2|gvt3|gvt4)\.com$' /tmp/gfw.txt \
+            | grep -vx 'xn--ngstr-lra8j.com\|gvt1.com\|gvt2.com\|gvt3.com\|gvt4.com' \
+            > lists/gfw-filtered.txt
+
+      - name: Validate output
+        run: |
+          LINES=$(wc -l < lists/gfw-filtered.txt)
+          echo "filtered lines: $LINES"
+          if [ "$LINES" -lt 1000 ]; then
+            echo "FAIL: filtered list too small ($LINES < 1000), aborting"
+            exit 1
+          fi
+          # 双保险：确认目标域名已被移除
+          if grep -E '^(xn--ngstr-lra8j|gvt1|gvt2|gvt3|gvt4)\.com$' lists/gfw-filtered.txt; then
+            echo "FAIL: target domains still present"
+            exit 1
+          fi
+          echo "validation OK"
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lists/gfw-filtered.txt
+          if git diff --cached --quiet; then
+            echo "No changes — skipping commit"
+          else
+            git commit -m "chore: sync filtered gfw list ($(date -u +%Y-%m-%d))"
+            git push
+            echo "Pushed update"
+          fi
